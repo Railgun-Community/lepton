@@ -16,6 +16,7 @@ import { ZERO_ADDRESS } from '../src/utils/constants';
 import { bytes } from '../src/utils';
 import { GeneratedCommitment, TokenType } from '../src/models/formatted-types';
 import { TransactionBatch } from '../src/transaction/transaction-batch';
+import { TransferDirection } from '../src/wallet/types';
 
 chai.use(chaiAsPromised);
 
@@ -186,6 +187,13 @@ describe('Lepton', function () {
 
     const newBalance2 = await wallet2.getBalance(chainID, tokenAddress);
     expect(newBalance2).to.equal(BigInt(1));
+
+    // check the transactions log
+    const log = (await wallet.transactionsLog(chainID))[tokenAddress];
+    expect(log[0].direction).eq(TransferDirection.Incoming);
+    expect(log[0].amount).eq(BigInt('109725000000000000000000'));
+    expect(log[1].direction).eq(TransferDirection.Outgoing);
+    expect(log[1].amount).eq(BigInt('300000000000000000001'));
   }).timeout(90000);
 
   it('Should set/get last synced block', async () => {

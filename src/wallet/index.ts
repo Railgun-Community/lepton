@@ -5,11 +5,15 @@ import EventEmitter from 'events';
 import msgpack from 'msgpack-lite';
 import { Database } from '../database';
 import LeptonDebug from '../debugger';
+import { bech32, Node } from '../keyderivation';
 import { SpendingKeyPair, ViewingKeyPair } from '../keyderivation/bip32';
 import { mnemonicToSeed } from '../keyderivation/bip39';
 import { MerkleTree } from '../merkletree';
-import { bech32, Node } from '../keyderivation';
+import { LeptonEvent, ScannedEventData } from '../models/event-types';
 import { BytesData, Commitment, NoteSerialized } from '../models/formatted-types';
+import { TXO } from '../models/txo-types';
+import { Note } from '../note';
+import { hash } from '../utils';
 import {
   arrayify,
   ByteLength,
@@ -20,22 +24,15 @@ import {
   hexStringToBytes,
   nToHex,
   numberify,
-  padToLength,
+  padToLength
 } from '../utils/bytes';
 import { poseidon } from '../utils/hash';
 import { getSharedSymmetricKey, signED25519 } from '../utils/keys-utils';
 import {
-  WalletDetails,
   AddressKeys,
   Balances,
-  BalancesByTree,
-  WalletData,
-  TreeBalance,
+  BalancesByTree, TransactionLogEntry, TransactionsLog, TransferDirection, TreeBalance, WalletData, WalletDetails
 } from './types';
-import { TXO } from '../models/txo-types';
-import { hash } from '../utils';
-import { Note } from '../note';
-import { LeptonEvent, ScannedEventData } from '../models/event-types';
 
 type WalletNodes = { spending: Node; viewing: Node };
 
@@ -103,6 +100,25 @@ class Wallet extends EventEmitter {
     this.spendingPublicKey = spendingKeyPair.pubkey;
 
     return this;
+  }
+
+/**
+ * Groups a list of transaction logs by txid
+ * @param list - list of transaction logs 
+ * @returns map of transaction logs by txid
+ */
+  private static groupBy(list: TransactionLogEntry[]): Map<string, TransactionLogEntry[]> {
+    const map = new Map();
+    list.forEach((item) => {
+         const key = item.txid;
+         const collection = map.get(key);
+         if (!collection) {
+             map.set(key, [item]);
+         } else {
+             collection.push(item);
+         }
+    });
+    return map;
   }
 
   /**
@@ -387,6 +403,89 @@ class Wallet extends EventEmitter {
       }),
     );
   }
+    /**
+   * Gets transactions history
+   * @param chainID - chainID to get balances for
+   * @returns history
+   */
+
+  async transactionsLog(chainID: number): Promise<TransactionsLog> {
+    const TXOs = await this.TXOs(chainID);
+    const tmpHistory: TransactionsLog = {};
+
+    // loop through each TXO and add it to the history
+    TXOs.forEach((txOutput) => {
+      const token = formatToByteLength(txOutput.note.token, 32, false);
+      // If we don't have an entry for this token yet, create one
+      if (!tmpHistory[token]) {
+        tmpHistory[token] = []
+      }
+      // first add entry for the token when it was received
+      tmpHistory[token].push({
+        txid: txOutput.txid,
+        amount: txOutput.note.value,
+        direction: TransferDirection.Incoming
+      })
+      // then add another entry if it was spent
+      if(txOutput.spendtxid) {
+        tmpHistory[token].push({
+          txid: txOutput.spendtxid,
+          amount: txOutput.note.value,
+          direction: TransferDirection.Outgoing
+        })
+      }
+    });  
+
+    // process history by handling joinsplit of TXOs within transactions
+    const history: TransactionsLog = {};
+    const tokens = Object.keys(tmpHistory);
+    tokens.forEach(token => {
+      if(!history[token]) {
+        history[token] = []
+      }
+      // group entries by txid 
+      const entries = tmpHistory[token];
+      const transactions = Wallet.groupBy(entries);
+      // eslint-disable-next-line no-restricted-syntax
+      for(const [key, value] of transactions) {
+        let spent = 0n;
+        let received = 0n;
+        const txid = key;
+        // sum amounts according to the direction
+        value.forEach(logEntry => {
+          if(logEntry.direction === TransferDirection.Outgoing)
+          spent += logEntry.amount;
+          else
+          received += logEntry.amount;
+        })
+        // receive only
+        if(spent === 0n) {
+          history[token].push({
+            txid,
+            amount: received,
+            direction: TransferDirection.Incoming
+          });
+        }
+        // spend only
+        else if(received === 0n) {
+          history[token].push({
+            txid,
+            amount: spent,
+            direction: TransferDirection.Outgoing
+        });
+        }
+        else {
+        // spend and receive
+      history[token].push({
+        txid,
+        amount: spent - received,
+        direction: TransferDirection.Outgoing
+      });
+      }
+    }
+  });
+  return history;
+  }
 
   /**
    * Gets wallet balances
@@ -410,7 +509,7 @@ class Wallet extends EventEmitter {
 
       // If txOutput is unspent process it
       if (!txOutput.spendtxid) {
-        // Store txo
+        // Store utxo
         balances[token].utxos.push(txOutput);
 
         // Increment balance
@@ -444,7 +543,7 @@ class Wallet extends EventEmitter {
       // Create balances tree array
       balancesByTree[token] = [];
 
-      // Loop through each UTXO and sort by ree
+      // Loop through each UTXO and sort by tree
       balances[token].utxos.forEach((utxo) => {
         if (!balancesByTree[token][utxo.tree]) {
           balancesByTree[token][utxo.tree] = {

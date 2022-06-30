@@ -25,3 +25,17 @@ export type AddressKeys = {
 };
 
 export type WalletData = { mnemonic: string; index: number };
+
+export enum TransferDirection {
+  Incoming = 'Incoming',
+  Outgoing = 'Outgoing'
+}
+export type TransactionLogEntry = {
+  txid: string;
+  amount: bigint;
+  direction: TransferDirection
+}
+
+export type TransactionsLog = {
+  [key: string]: TransactionLogEntry[];
+}
